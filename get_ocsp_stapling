@@ -2,7 +2,7 @@
 # script /usr/local/sbin/get_ocsp_stapling
 
 MKTEMP="/bin/mktemp"
-OBIN="/usr/local/bin/qssl"
+OBIN="/usr/bin/openssl"
 SOCAT="/usr/bin/socat"
 B64="/usr/bin/base64"
 CUT="/usr/bin/cut"
