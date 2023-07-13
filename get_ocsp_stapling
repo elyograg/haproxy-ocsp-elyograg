@@ -1,0 +1,128 @@
+#!/bin/sh
+# script /usr/local/sbin/get_ocsp_stapling
+
+MKTEMP="/bin/mktemp"
+OBIN="/usr/local/bin/qssl"
+SOCAT="/usr/bin/socat"
+B64="/usr/bin/base64"
+CUT="/usr/bin/cut"
+GREP="/bin/grep"
+MV="/bin/mv"
+CP="/bin/cp"
+CERTLIST="/usr/local/etc/ocsp_list.cfg"
+SOCKET="/etc/haproxy/stats.socket"
+#CERT_COUNTER="0"
+OCSP_OUT="$("${MKTEMP}")"
+RET="$?"
+if [ "${RET}" -ne 0 ]; then
+  echo Unable to create temp outfile
+  cleanup_and_exit 1
+fi
+OCSP_ERR="$("${MKTEMP}")"
+RET="$?"
+if [ "${RET}" -ne 0 ]; then
+  echo Unable to create temp errfile
+  cleanup_and_exit 1
+fi
+OCSP_TMP="$("${MKTEMP}")"
+RET="$?"
+if [ ${RET} -ne 0 ]; then
+  echo Unable to create temp errfile
+  cleanup_and_exit 1
+fi
+
+cleanup_tempfiles() {
+  if [ -n "${OCSP_OUT}" ]; then
+    rm -rf "${OCSP_OUT}"
+  fi
+  if [ -n "${OCSP_ERR}" ]; then
+    rm -rf "${OCSP_ERR}"
+  fi
+  if [ -n "${OCSP_TMP}" ]; then
+    rm -rf "${OCSP_TMP}"
+  fi
+}
+
+cleanup_and_exit() {
+  cleanup_tempfiles
+  exit "$1"
+}
+
+#for FILE in "$(cat "${CERTLIST}")"; do
+while read -r CERT ISSUER
+do
+  OCSP="${CERT}.ocsp"
+  if [ -f "${OCSP}" ]; then
+    "${MV}" "${OCSP}" "${OCSP}.bak"
+    RET="$?"
+    if [ "${RET}" -ne 0 ]; then
+      echo "Unable to rename existing ${OCSP}"
+      cleanup_and_exit 1
+    fi
+  fi
+  URI="$("${OBIN}" x509 -text -noout -in "${CERT}" | "${GREP}" OCSP \
+    | "${CUT}" -f 2- -d:)"
+  RET="$?"
+  if [ "${RET}" -ne 0 ]; then
+    echo "Unable to extract OCSP URI from ${CERT}"
+    cleanup_and_exit 1
+  fi
+  HOST="$(echo "${URI}" | "${CUT}" -f3 -d/)"
+  RET="$?"
+  if [ "${RET}" -ne 0 ]; then
+    echo "Unable to extract host from URI"
+    cleanup_and_exit 1
+  fi
+
+  cleanup_tempfiles
+  "${OBIN}" ocsp -noverify \
+    -issuer "${ISSUER}" \
+    -cert "${CERT}" \
+    -url "${URI}" \
+    -respout "${OCSP_TMP}" \
+    -no_nonce -header Host="${HOST}." \
+    > "${OCSP_OUT}" 2> "${OCSP_ERR}"
+
+    # blank line above is intentional and required
+  RET="$?"
+  if [ "${RET}" -ne 0 ]; then
+    echo "Unable to obtain ${OCSP}, return ${RET}"
+    echo "ISSUER=${ISSUER}"
+    echo "CERT=${CERT}"
+    echo "URI=${URI}"
+    echo "OCSP=${OCSP}"
+    echo "HOST=${HOST}"
+    echo "OUT"
+    cat "$OCSP_OUT"
+    echo "ERR"
+    cat "$OCSP_ERR"
+    cleanup_and_exit 1
+  fi
+  if [ -f "${OCSP_TMP}" ]; then
+    B64_RESP="$("${B64}" -w 10000 "${OCSP_TMP}")"
+    RET="$?"
+    if [ "${RET}" -ne 0 ]; then
+      echo Unable to convert to base64
+      cleanup_and_exit 1
+    fi
+    SOCKET_CMD="set ssl ocsp-response ${B64_RESP}"
+    RET="$?"
+    if [ "${RET}" -ne 0 ]; then
+      echo Unable to create socket command
+      cleanup_and_exit 1
+    fi
+    echo "${SOCKET_CMD}" | "${SOCAT}" stdio "${SOCKET}" \
+      > /dev/null 2> /dev/null
+
+    # blank line above is intentional
+    RET="$?"
+    #if [ "${RET}" -ne 0 ]; then
+    #  echo Unable to send command to haproxy socket
+    #  cleanup_and_exit 0
+    #fi
+    "${CP}" -f "${OCSP_TMP}" "${OCSP}"
+  else
+    echo "$OCSP doesn't exist!"
+  fi
+done < "${CERTLIST}"
+cleanup_and_exit 0
